@@ -1,1 +1,8 @@
-
+{
+  "name": "nhgp-attendance-mw",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opengovsg/formsg-sdk": "^0.13.5"
+  }
+}
