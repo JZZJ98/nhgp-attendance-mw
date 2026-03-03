@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@opengovsg/formsg-sdk": "^0.13.5"
+    "@opengovsg/formsg-sdk": "^0.15.0"
   }
 }
