@@ -1,7 +1,7 @@
 // --- CORS helper (top of file) ---
 function withCors(req, res) {
   const origin = req.headers.origin || '';
-  const allowedOrigin = 'https://YOUR-GITHUB-USERNAME.github.io'; // <-- change this
+  const allowedOrigin = 'https://JZZJ98.github.io'; // <-- change this
 
   if (origin === allowedOrigin || origin.endsWith('.github.io')) {
     res.setHeader('Access-Control-Allow-Origin', origin);
