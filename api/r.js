@@ -15,3 +15,6 @@ function withCors(req, res) {
     res.status(204).end();
     return true;
   }
+
+  return false;
+}
