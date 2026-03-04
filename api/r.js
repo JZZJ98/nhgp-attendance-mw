@@ -27,9 +27,11 @@ export default async function handler(req, res) {
   if (!pass || pass.expAt < Date.now()) return res.status(410).send('Link expired');
   if (pass.redeemed) return res.status(409).send('Already used link');
 
+  // mark redeemed atomically
   pass.redeemed = true; memory.passes.set(jti, pass);
 
-  const formUrl = new URL('https://form.gov.sg/69647c83f2170fd29c8fec32'); // YOUR live FormSG URL
+  // Redirect to your live FormSG form with prefilled hidden fields
+  const formUrl = new URL('https://form.gov.sg/69647c83f2170fd29c8fec32');
   formUrl.searchParams.set('jti', jti);
   formUrl.searchParams.set('site_id', pass.site_id);
 
