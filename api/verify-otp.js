@@ -14,58 +14,43 @@ function withCors(req, res) {
   return false;
 }
 
-// Read raw body safely (used if Vercel didn't pre-parse it)
+// Raw body reader (if Vercel didn't parse)
 function readRaw(req) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     try {
       let data = '';
-      req.on('data', chunk => { data += chunk; });
+      req.on('data', (ch) => { data += ch; });
       req.on('end', () => resolve(data));
-      req.on('error', reject);
-    } catch (e) {
-      resolve('');
-    }
+      req.on('error', () => resolve(''));
+    } catch { resolve(''); }
   });
 }
 
-// Helper: accept JSON or form POST (handles string or object bodies)
+// Accept JSON or form POST
 async function readCode(req) {
-  // 1) If Vercel already parsed body as object
   if (req.body && typeof req.body === 'object') {
     const maybe = req.body.code;
     if (typeof maybe === 'string') return maybe.trim();
   }
-
-  // 2) Otherwise read raw payload and parse based on content-type
   const ctype = (req.headers['content-type'] || '').toLowerCase();
   const raw = await readRaw(req);
   if (!raw) return '';
-
-  // JSON
   if (ctype.includes('application/json')) {
-    try {
-      const obj = JSON.parse(raw);
-      if (obj && typeof obj.code === 'string') return obj.code.trim();
-    } catch { /* fall through */ }
+    try { const o = JSON.parse(raw); if (o && typeof o.code === 'string') return o.code.trim(); } catch {}
   }
-
-  // x-www-form-urlencoded
   if (ctype.includes('application/x-www-form-urlencoded')) {
-    try {
-      const p = new URLSearchParams(raw);
-      const v = p.get('code');
-      if (v) return v.trim();
-    } catch { /* fall through */ }
+    try { const p = new URLSearchParams(raw); const v = p.get('code'); if (v) return v.trim(); } catch {}
   }
-
-  // Last resort: try URLSearchParams anyway
-  try {
-    const p = new URLSearchParams(raw);
-    const v = p.get('code');
-    if (v) return v.trim();
-  } catch { /* ignore */ }
-
+  try { const p = new URLSearchParams(raw); const v = p.get('code'); if (v) return v.trim(); } catch {}
   return '';
+}
+
+// Simple HMAC-like signature using SHA-256(secret + meta)
+// meta = `${jti}.${site_id}.${expAt}`
+async function signMeta(meta, secret) {
+  const data = new TextEncoder().encode(secret + '|' + meta);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 export default async function handler(req, res) {
@@ -76,17 +61,16 @@ export default async function handler(req, res) {
     const cookies = parseCookie(req.headers.cookie || '');
     const sid = cookies.sid;
 
-    // Prefer memory session if present
+    // Prefer memory session
     let sess = sid && memory.sessions.get(sid);
-
-    // Fallback from cookies if memory missing (serverless cross-instance)
     if (!sess) {
+      // Fallback from cookies (from previous steps)
       const siteId = cookies.site && decodeURIComponent(cookies.site);
       const tagId  = cookies.tag && decodeURIComponent(cookies.tag);
       const otpHash = cookies.otphash;
       const otpExpiry = Number(cookies.otpexp || 0);
       if (!siteId || !tagId || !otpHash || !otpExpiry) {
-        console.warn('[verify-otp] no_session cookies:', cookies);
+        console.warn('[verify-otp] no_session (cookies missing)');
         return res.status(401).json({ ok:false, error:'no_session' });
       }
       sess = { status: 'otp_sent', site_id: siteId, tagId, otpHash, otpExpiry };
@@ -101,10 +85,16 @@ export default async function handler(req, res) {
       return res.status(401).json({ ok:false, error:'invalid_or_expired' });
     }
 
-    // create one-time pass jti
+    // Mint one-time pass (jti)
     const jti = cryptoRandom(16);
-    const expAt = Date.now() + 2*60*1000; // 2 minutes to redeem
-    memory.passes.set(jti, { site_id: sess.site_id, tagId: sess.tagId, redeemed:false, used:false, expAt });
+    const expAt = Date.now() + 2 * 60 * 1000; // 2 minutes to redeem
+    memory.passes.set(jti, {
+      site_id: sess.site_id,
+      tagId: sess.tagId,
+      redeemed: false,
+      used: false,
+      expAt
+    });
 
     // Optional: mark verified in memory if sid exists
     if (sid) {
@@ -112,17 +102,29 @@ export default async function handler(req, res) {
       memory.sessions.set(sid, sess);
     }
 
-    // 302 redirect to one-time redirect endpoint
+    // ---- Cookie fallback for /api/r (in case it runs on a different instance) ----
+    const secret = process.env.JWT_SECRET || 'devsecret';
+    const meta = `${jti}.${sess.site_id}.${expAt}`;
+    const sig  = await signMeta(meta, secret);
+
+    res.setHeader('Set-Cookie', [
+      `pass_meta=${encodeURIComponent(meta)}; Path=/; Secure; SameSite=None; Max-Age=180`,
+      `pass_sig=${sig}; Path=/; Secure; SameSite=None; Max-Age=180`,
+    ]);
+    // ------------------------------------------------------------------------------
+
+    // 302 to /api/r/<jti>
     res.writeHead(302, { Location: `/api/r/${jti}` });
     return res.end();
   } catch (e) {
     console.error('[verify-otp] fatal error:', e);
-    // Return a safe JSON so you see the error in the Network panel
     return res.status(500).json({ ok:false, error:'internal_error' });
   }
 }
 
-const memory = globalThis.__NHGP_MEM__ || (globalThis.__NHGP_MEM__ = { sessions: new Map(), passes: new Map() });
+const memory = globalThis.__NHGP_MEM__ || (
+  globalThis.__NHGP_MEM__ = { sessions: new Map(), passes: new Map() }
+);
 
 function parseCookie(c){
   const out = {};
@@ -137,7 +139,8 @@ function parseCookie(c){
 }
 
 function cryptoRandom(n){
-  return [...crypto.getRandomValues(new Uint8Array(n))].map(b=>b.toString(16).padStart(2,'0')).join('');
+  return [...crypto.getRandomValues(new Uint8Array(n))]
+    .map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
 async function sha256(s){
@@ -146,9 +149,5 @@ async function sha256(s){
 }
 
 export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '64kb' // keep default parsing on (JSON & urlencoded if Vercel provides it)
-    }
-  }
+  api: { bodyParser: { sizeLimit: '64kb' } }
 };
