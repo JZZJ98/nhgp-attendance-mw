@@ -1,15 +1,38 @@
 export default async function handler(req, res) {
   try {
-    // Vercel provides dynamic path params on req.query
     const { jti } = req.query || {};
     if (!jti) return res.status(400).send('Missing token');
 
-    const pass = memory.passes.get(jti);
-    if (!pass) return res.status(410).send('Link expired or invalid');
+    // 1) Try memory first
+    let pass = memory.passes.get(jti);
+    if (!pass) {
+      // 2) Fallback: verify signed cookies
+      const cookies = parseCookie(req.headers.cookie || '');
+      const meta = cookies.pass_meta && decodeURIComponent(cookies.pass_meta);
+      const sig  = cookies.pass_sig || '';
+      if (!meta || !sig) return res.status(410).send('Link expired or invalid');
+
+      // meta = `${jti}.${site_id}.${expAt}`
+      const parts = meta.split('.');
+      if (parts.length !== 3) return res.status(410).send('Link expired or invalid');
+      const [jtiFromCookie, siteId, expAtStr] = parts;
+      if (jtiFromCookie !== jti) return res.status(410).send('Link expired or invalid');
+
+      const expAt = Number(expAtStr || 0);
+      if (!expAt || Date.now() > expAt) return res.status(410).send('Link expired');
+
+      const secret = process.env.JWT_SECRET || 'devsecret';
+      const sigCheck = await signMeta(meta, secret);
+      if (sig !== sigCheck) return res.status(410).send('Link expired or invalid');
+
+      // Construct pass from cookie
+      pass = { site_id: siteId, tagId: undefined, redeemed: false, used: false, expAt };
+    }
+
     if (pass.expAt < Date.now()) return res.status(410).send('Link expired');
     if (pass.redeemed) return res.status(409).send('Already used link');
 
-    // Mark redeemed atomically
+    // Mark redeemed in memory (best effort)
     pass.redeemed = true;
     memory.passes.set(jti, pass);
 
@@ -26,7 +49,25 @@ export default async function handler(req, res) {
   }
 }
 
-// Use a shared in-memory object (demo only). For production, move to Redis/KV.
+// Sign helper used by both verify-otp and r/[jti]
+async function signMeta(meta, secret) {
+  const data = new TextEncoder().encode(secret + '|' + meta);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 const memory = globalThis.__NHGP_MEM__ || (
   globalThis.__NHGP_MEM__ = { sessions: new Map(), passes: new Map() }
 );
+
+function parseCookie(c){
+  const out = {};
+  (c || '').split(';').forEach((pair) => {
+    const idx = pair.indexOf('=');
+    if (idx === -1) return;
+    const k = pair.slice(0, idx).trim();
+    const v = pair.slice(idx+1).trim();
+    out[k] = v;
+  });
+  return out;
+}
