@@ -1,7 +1,7 @@
-// --- CORS helper (top of file) ---
+// --- CORS helper ---
 function withCors(req, res) {
   const origin = req.headers.origin || '';
-  const allowedOrigin = 'https://JZZJ98.github.io'; // <-- your GitHub Pages origin EXACT
+  const allowedOrigin = 'https://JZZJ98.github.io'; // <-- GH Pages origin EXACT
 
   if (origin === allowedOrigin || origin.endsWith('.github.io')) {
     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -21,46 +21,43 @@ export default async function handler(req, res) {
   const cookies = parseCookie(req.headers.cookie || '');
   const sid = cookies.sid;
 
-  // Prefer in-memory session (if same instance handles this request)
+  // Prefer in-memory session (same instance)
   let sess = sid && memory.sessions.get(sid);
 
-  // Fallback to cookies if memory missing (different instance)
+  // Fallback to cookies if memory missing
   if (!sess) {
     const siteId = cookies.site && decodeURIComponent(cookies.site);
     const tagId  = cookies.tag && decodeURIComponent(cookies.tag);
-    if (!siteId || !tagId) {
-      return res.status(401).json({ ok:false, error:'no_session' });
-    }
+    if (!siteId || !tagId) return res.status(401).json({ ok:false, error:'no_session' });
     sess = { status: 'location_ok', site_id: siteId, tagId };
   }
 
   if (sess.status !== 'location_ok') return res.status(400).json({ ok:false });
 
-  // Generate 6-digit OTP
+  // Generate OTP
   const otp = (Math.floor(100000 + Math.random()*900000)).toString();
   sess.otpHash = await sha256(otp);
   sess.otpExpiry = Date.now() + 2*60*1000; // 2 minutes
   sess.status = 'otp_sent';
-
-  // Keep in memory if we have a sid (best effort)
   if (sid) memory.sessions.set(sid, sess);
 
-  // Mirror OTP info into cookies so /verify-otp can fall back if needed
+  // Mirror OTP info into cookies as fallback
   res.setHeader('Set-Cookie', [
     `otphash=${sess.otpHash}; Path=/; Secure; SameSite=None; Max-Age=180`,
     `otpexp=${sess.otpExpiry}; Path=/; Secure; SameSite=None; Max-Age=180`,
   ]);
 
-  // TODO: send via org email/SMS (for now, print to logs)
+  // TODO: Send via org email/SMS. For pilot, log it:
   console.log('DEBUG OTP (replace with real send):', otp);
 
   return res.json({ ok:true, expires_in:120 });
 }
 
-const memory = globalThis.__NHGP_MEM__ || (globalThis.__NHGP_MEM__ = { sessions: new Map(), passes: new Map() });
+const memory = globalThis.__NHGP_MEM__ || (
+  globalThis.__NHGP_MEM__ = { sessions: new Map(), passes: new Map() }
+);
 
 function parseCookie(c){
-  // robust parser that preserves '=' in values
   const out = {};
   (c || '').split(';').forEach((pair) => {
     const idx = pair.indexOf('=');
