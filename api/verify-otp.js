@@ -1,7 +1,7 @@
-// --- CORS helper (top of file) ---
+// --- CORS helper ---
 function withCors(req, res) {
   const origin = req.headers.origin || '';
-  const allowedOrigin = 'https://JZZJ98.github.io'; // <-- your GitHub Pages origin EXACT
+  const allowedOrigin = 'https://JZZJ98.github.io'; // <-- GH Pages origin
 
   if (origin === allowedOrigin || origin.endsWith('.github.io')) {
     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -14,7 +14,7 @@ function withCors(req, res) {
   return false;
 }
 
-// Raw body reader (if Vercel didn't parse)
+// Helpers to read body
 function readRaw(req) {
   return new Promise((resolve) => {
     try {
@@ -25,12 +25,9 @@ function readRaw(req) {
     } catch { resolve(''); }
   });
 }
-
-// Accept JSON or form POST
 async function readCode(req) {
-  if (req.body && typeof req.body === 'object') {
-    const maybe = req.body.code;
-    if (typeof maybe === 'string') return maybe.trim();
+  if (req.body && typeof req.body === 'object' && typeof req.body.code === 'string') {
+    return req.body.code.trim();
   }
   const ctype = (req.headers['content-type'] || '').toLowerCase();
   const raw = await readRaw(req);
@@ -38,15 +35,12 @@ async function readCode(req) {
   if (ctype.includes('application/json')) {
     try { const o = JSON.parse(raw); if (o && typeof o.code === 'string') return o.code.trim(); } catch {}
   }
-  if (ctype.includes('application/x-www-form-urlencoded')) {
-    try { const p = new URLSearchParams(raw); const v = p.get('code'); if (v) return v.trim(); } catch {}
-  }
+  // x-www-form-urlencoded
   try { const p = new URLSearchParams(raw); const v = p.get('code'); if (v) return v.trim(); } catch {}
   return '';
 }
 
-// Simple HMAC-like signature using SHA-256(secret + meta)
-// meta = `${jti}.${site_id}.${expAt}`
+// Sign helper: SHA-256(secret | meta), meta = `${jti}.${site_id}.${exp}`
 async function signMeta(meta, secret) {
   const data = new TextEncoder().encode(secret + '|' + meta);
   const digest = await crypto.subtle.digest('SHA-256', data);
@@ -63,8 +57,9 @@ export default async function handler(req, res) {
 
     // Prefer memory session
     let sess = sid && memory.sessions.get(sid);
+
+    // Fallback from cookies
     if (!sess) {
-      // Fallback from cookies (from previous steps)
       const siteId = cookies.site && decodeURIComponent(cookies.site);
       const tagId  = cookies.tag && decodeURIComponent(cookies.tag);
       const otpHash = cookies.otphash;
@@ -85,33 +80,30 @@ export default async function handler(req, res) {
       return res.status(401).json({ ok:false, error:'invalid_or_expired' });
     }
 
-    // Mint one-time pass (jti)
+    // Mint one-time pass
     const jti = cryptoRandom(16);
-    const expAt = Date.now() + 2 * 60 * 1000; // 2 minutes to redeem
+    const expAt = Date.now() + 2*60*1000;
     memory.passes.set(jti, {
       site_id: sess.site_id,
       tagId: sess.tagId,
-      redeemed: false,
-      used: false,
+      redeemed:false,
+      used:false,
       expAt
     });
 
-    // Optional: mark verified in memory if sid exists
     if (sid) {
       sess.status = 'otp_verified';
       memory.sessions.set(sid, sess);
     }
 
-    // ---- Cookie fallback for /api/r (in case it runs on a different instance) ----
-    const secret = process.env.JWT_SECRET || 'devsecret';
+    // Set signed cookie fallback for /api/r (in case cross-instance hit)
     const meta = `${jti}.${sess.site_id}.${expAt}`;
+    const secret = process.env.JWT_SECRET || 'devsecret';
     const sig  = await signMeta(meta, secret);
-
     res.setHeader('Set-Cookie', [
       `pass_meta=${encodeURIComponent(meta)}; Path=/; Secure; SameSite=None; Max-Age=180`,
       `pass_sig=${sig}; Path=/; Secure; SameSite=None; Max-Age=180`,
     ]);
-    // ------------------------------------------------------------------------------
 
     // 302 to /api/r/<jti>
     res.writeHead(302, { Location: `/api/r/${jti}` });
