@@ -42,6 +42,7 @@ export default async function handler(req, res) {
     formUrl.searchParams.set('site_id', pass.site_id)
     formUrl.searchParams.set('gate', gate)
     formUrl.searchParams.set('exp', String(expAt)) // ms timestamp
+    formUrl.searchParams.set('access_gate', 'ok');
 
     res.writeHead(302, { Location: formUrl.toString() })
     return res.end()
